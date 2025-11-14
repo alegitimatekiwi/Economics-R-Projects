@@ -1,0 +1,223 @@
+---
+title: ''
+output:
+  html_document:
+    fig_height: 8
+    fig_width: 8
+    highlight: textmate
+    theme: cerulean
+  pdf_document: default
+---
+
+<base target="_top"/>
+
+ECON 43\
+Name: Atmika Bhatt, Romie Gouilliard, Elaine Zhang\
+Date: May 11, 2025 
+
+--- 
+## Data Assignment 6: Using Bay Area salary data from Transparent California
+### Summary
+
+```{r, message=F, warning=F, comment=NA, echo=T}
+
+#==============================================================================
+#   Transparent California
+#==============================================================================
+
+# original by Michael Kevane 10/14/2017
+# revised May 2021
+
+# Description: Create tables of descriptive statistics for 
+# Salary data for public employees in California
+# data is from http://transparentcalifornia.com
+
+#==============================================================================
+#   1. Settings, packages, and options
+#==============================================================================
+
+  # Clear the working space
+  rm(list = ls())
+  
+  # Set working directory  
+  setwd("/Users/ezhang2/Desktop/")
+
+  # Load useful packages 
+  library(tidyverse)
+  library(foreign)
+  library(sandwich)
+  library(modelsummary)
+  library(purrr)
+  library(estimatr)
+  library(gender)
+  library(dplyr)
+  library(gt)
+  
+  # turn off scientific notation except for big numbers
+  options(scipen = 9)
+
+```
+
+
+
+
+```{r, message=F, warning=F, comment=NA, echo=T}
+# specify cities and years 
+  URL <- expand.grid(cities = c("albany", "alameda", "berkeley", "san-jose", "oakland","los-angeles", "san-diego", "san-francisco", "sacramento"),
+    years = c("2012", "2013", "2014", "2015", "2016", "2017", "2018", "2019","2020","2021"),
+    stringsAsFactors = FALSE)
+  URL$url <- paste("https://transcal.s3.amazonaws.com/public/export/", URL$cities, "-", URL$years, ".csv", sep="")
+URL <- as.list(URL$url)
+  oldnames <- c("employee_name", "job_title", "base_pay", "overtime_pay", "other_pay", "total_benefits", "total_pay", "total_pay_benefits", "year", "notes")
+  newnames <- c("Employee.Name", "Job.Title", "Base.Pay", "Overtime.Pay", "Other.Pay", "Total.Benefits", "Total.Pay", "Total.Pay...Benefits", "Year", "Notes")
+  
+  get_tc_2 <- function(x) { 
+       temp=read.csv(x)
+       found <- match(colnames(temp), oldnames, nomatch = 0)
+       colnames(temp)[colnames(temp) %in% oldnames] <- newnames[found]
+       return(cbind(x,temp))
+    }
+  salary_data <- lapply(URL, get_tc_2)
+  
+  #https://stackoverflow.com/questions/12664430/delete-a-column-in-a-data-frame-within-a-list
+  salary_data <- map_if(salary_data, ~ "Pension.Debt" %in% names(.x), ~ .x %>% select(-Pension.Debt), .depth = 2)
+  salary_data <- map_if(salary_data, ~ "aggregate.annual.pension.debt.payment" %in% names(.x), ~ .x %>% select(-aggregate.annual.pension.debt.payment), .depth = 2)
+
+
+  # Can turn into dataset this way
+  transcalif_2 <- do.call("rbind", salary_data)
+  table(transcalif_2$Year)
+  transcalif_2$name = as.character(transcalif_2$Employee.Name)
+  transcalif_2$namelc = tolower(transcalif_2$name)
+  transcalif_2$firstname <- sapply(strsplit(transcalif_2$namelc, " "), '[', 1)
+  transcalif_2$lastname <- sapply(strsplit(transcalif_2$namelc, " "), '[', 2)
+
+
+```
+
+
+
+
+```{r, message=F, warning=F, comment=NA, echo=T}
+### Descriptive statistics for CA schools data
+  
+  # Table of means by a factor variable (a crosstab)
+  transcalif_2 %>% filter(Base.Pay>25000) %>% group_by(Agency) %>% 
+    summarize(Base.Pay =mean(Base.Pay,na.rm=TRUE))
+  
+  # Need file path
+  names = read.csv("names california.csv")
+  head(names)
+  names$name = as.character(names$name)
+  names$firstname =tolower(names$name)
+  # drop duplicted names - note some names are male and female
+  # so really should be noting that
+  names <- names[!duplicated(names$firstname), ]
+  # merge the datasets using join in library(plyr)
+  # set type='left' here so that  get all of the first data frame, 
+  # but only the relevant rows from the names dataset.
+  sccsal_inner = inner_join(transcalif_2, names, by='firstname')
+  sccsal_left = left_join(transcalif_2, names, by='firstname')
+  
+  table(sccsal_left$female)
+     
+  
+  # remove some data sets from your workspace
+  rm(list = c("names"))
+
+  
+  #extracting unique first names
+  unique_names <- unique(sccsal_left$firstname)
+  
+  # Exclude any NA values to avoid errors in gender prediction
+  unique_names <- unique_names[!is.na(unique_names)]
+  
+  # Use the "ssa" method to predict gender based on U.S. Social Security data
+  gender_results <- gender(unique_names, method = "ssa")
+  
+  # Check the results: gender_results contains columns like 'name' and 'gender'
+  head(gender_results)
+  
+  # Keep only the relevant columns and rename them for clarity
+  gender_results <- gender_results %>%
+    select(name, gender) %>%
+    rename(firstname = name)
+  
+  #Merge Predicted Gender Back to the Original DataFrame
+  sccsal_left <- sccsal_left %>%
+    left_join(gender_results, by = "firstname")
+  
+
+  
+  # Replace NA values in the 'female' column with values from the 'gender' column
+  # Assuming 'gender' column contains "male" or "female" (or other values like "unknown")
+  sccsal_left <- sccsal_left %>%
+    mutate(
+      female = ifelse(is.na(female), 
+                      ifelse(gender == "male", 0, ifelse(gender == "female", 1, NA)), 
+                      female)
+    )
+  
+  # Check the updated dataset
+  head(sccsal_left)
+  
+  # For box plots need to turn variables into factor variables
+  sccsal_left$femalefac=as.factor(sccsal_left$female)
+  
+  
+  sccsal_left %>%
+    # In case you have any NAs in gender, we’ll count them too
+    group_by(gender = replace_na(gender, "unknown")) %>%
+    summarize(
+      n = n(),
+      pct = n / nrow(sccsal_left) * 100
+    ) %>%
+    gt() %>%
+    fmt_number(
+      columns = pct,
+      decimals = 1
+    ) %>%
+    cols_label(
+      gender = "Predicted Gender",
+      n      = "Count",
+      pct    = "Percent"
+    ) %>%
+    tab_header(
+      title = "Gender Breakdown of SCC Salaries Dataset"
+    )
+
+
+  
+
+
+
+```
+
+
+
+
+```{r, message=F, warning=F, comment=NA, echo=T}
+# Assuming sccsal_left contains a 'female' factor and 'Total.Pay'
+# For example, we can create a violin plot to compare total pay distribution by gender (female factor)
+ggplot(sccsal_left, aes(x = femalefac, y = Total.Pay, fill = femalefac)) +
+  geom_violin(trim = FALSE) +  # Creates the violin plot
+  scale_fill_manual(values = c("lightblue", "orange", "pink")) +  # Adjust colors
+  labs(title = "Total Pay Distribution by Gender", 
+       x = "Female?", 
+       y = "Total Pay") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),  # Title styling
+    axis.title = element_text(size = 14, face = "bold"),  # Axis labels
+    axis.text = element_text(size = 12),  # Axis text size
+    legend.position = "none",  # Optionally remove legend
+    panel.grid = element_blank(),  # Remove grid lines
+    panel.border = element_blank()  # Remove plot border
+  ) +
+  geom_boxplot(width = 0.1, color = "black", outlier.colour = "red", outlier.size = 2)  # Add a boxplot inside the violin for better visual
+
+
+```
+
+
+
